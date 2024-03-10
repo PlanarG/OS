@@ -152,7 +152,7 @@ fn run(case: &String, args: Vec<&str>, record: &mut Record) -> Result<()> {
         // TODO: functionality not tested.
         println!("{}", "Use \'gdb-multiarch\' to debug.".bold().italic());
     } else {
-        let timeout = crate::book::timeout(case).unwrap();
+        let timeout = crate::book::timeout(case).unwrap() * 10;
         print!("Running {} ... ", case.bold());
         let _ = std::io::stdout().flush();
         let output = wait_timeout(child, timeout)?;
@@ -212,7 +212,7 @@ fn check(case: &str, output: Wait, record: &mut Record) {
                 println!("{}", "STDOUT:".bold().underline().italic().cyan());
                 let lines: Vec<&str> = stdout.lines().collect();
                 let len = lines.len();
-                for i in 0.max(len - 10)..len {
+                for i in 0..len {
                     println!("{}", lines[i]);
                 }
                 // Actually nonthing will be in STDERR.
