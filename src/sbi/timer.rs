@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicI64, Ordering::SeqCst};
 
-use crate::sbi::set_timer;
+use crate::{sbi::set_timer, thread::Manager};
 
 pub const TICKS_PER_SEC: usize = 10;
 pub const CLOCK_PRE_SEC: usize = 12500000;
@@ -40,6 +40,7 @@ pub fn timer_ticks() -> i64 {
 /// Increments timer ticks by 1 and sets the next timer interrupt.
 pub fn tick() {
     TICKS.fetch_add(1, SeqCst);
+    Manager::get().check_sleep_threads();
     next();
 }
 

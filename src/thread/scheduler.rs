@@ -26,4 +26,6 @@ pub trait Schedule: Default {
     /// Choose the next thread to run. `None` if scheduler decides to keep running
     /// the current thread.
     fn schedule(&mut self) -> Option<Arc<Thread>>;
+
+    fn next(&mut self) -> Option<Arc<Thread>>;
 }

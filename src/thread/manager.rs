@@ -1,9 +1,11 @@
 //! Manager of all kernel threads
 
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::DerefMut;
+use core::sync::atomic::Ordering::SeqCst;
 
 use crate::mem::KernelPgTable;
 use crate::sbi::interrupt;
@@ -12,6 +14,8 @@ use crate::thread::{
     schedule, switch, Builder, Mutex, Schedule, Scheduler, Status, Thread, PRI_DEFAULT, PRI_MIN,
 };
 
+use super::get_priority;
+
 /* --------------------------------- MANAGER -------------------------------- */
 /// Global thread manager, contains a scheduler and a current thread.
 pub struct Manager {
@@ -19,6 +23,8 @@ pub struct Manager {
     pub scheduler: Mutex<Scheduler>,
     /// The current running thread
     pub current: Mutex<Arc<Thread>>,
+    /// All sleeping threads waiting to wake up
+    pub sleep_threads: Mutex<BTreeMap<i64, Vec<Arc<Thread>>>>,
     /// All alive and not yet destroyed threads
     all: Mutex<Vec<Arc<Thread>>>,
 }
@@ -33,6 +39,7 @@ impl Manager {
                 scheduler: Mutex::new(Scheduler::default()),
                 all: Mutex::new(Vec::from([initial.clone()])),
                 current: Mutex::new(initial),
+                sleep_threads: Mutex::new(BTreeMap::new()),
             };
 
             let idle = Builder::new(|| loop {
@@ -57,6 +64,41 @@ impl Manager {
         self.all.lock().push(thread.clone());
     }
 
+    /// register a sleeping thread, then the manager will block it and check the time barrier per tick
+    pub fn register_sleep_thread(&self, thread: Arc<Thread>, barrier: i64) {
+        let old = interrupt::set(false);
+        let mut threads_lock = self.sleep_threads.lock();
+        threads_lock
+            .entry(barrier)
+            .and_modify(|list| list.push(thread.clone()))
+            .or_insert(Vec::from([thread]));
+        drop(threads_lock);
+        interrupt::set(old);
+    }
+
+    /// invoked by tick() in timer.rs. unfrozen all ready threads
+    pub fn check_sleep_threads(&self) {
+        use crate::sbi::timer::timer_ticks;
+        use crate::thread::wake_up;
+
+        let old = interrupt::set(false);
+
+        let current = timer_ticks();
+        let mut wake_list = self.sleep_threads.lock();
+        let remaining = wake_list.split_off(&(current + 1));
+        for (_, v) in wake_list.iter() {
+            for threads in v {
+                if threads.status() == Status::Blocked {
+                    wake_up(threads.clone());
+                }
+            }
+        }
+        *wake_list = remaining;
+
+        drop(wake_list);
+        interrupt::set(old);
+    }
+
     /// Choose a `ready` thread to run if possible. If found, do as follows:
     ///
     /// 1. Turn off intr. Mark the `next` thread as [`Running`](Status::Running) and
@@ -70,7 +112,7 @@ impl Manager {
     pub fn schedule(&self) {
         let old = interrupt::set(false);
 
-        let next = self.scheduler.lock().schedule();
+        let next = self.scheduler.lock().next();
 
         // Make sure there's at least one thread runnable.
         assert!(
@@ -78,7 +120,17 @@ impl Manager {
             "no thread is ready"
         );
 
-        if let Some(next) = next {
+        if next.clone().is_some_and(|next| {
+            next.priority.load(SeqCst) >= get_priority()
+                || self.current.lock().status() != Status::Running
+        }) {
+            let next = self.scheduler.lock().schedule().unwrap();
+
+            // kprintln!(
+            //     "switch to a thread whose priority is {}",
+            //     next.priority.load(SeqCst)
+            // );
+
             assert_eq!(next.status(), Status::Ready);
             next.set_status(Status::Running);
 

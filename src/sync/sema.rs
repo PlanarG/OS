@@ -1,9 +1,9 @@
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
 use core::cell::{Cell, RefCell};
 
+use crate::pq::FIFOPrioriyQueue;
 use crate::sbi;
-use crate::thread::{self, Thread};
+use crate::thread::scheduler::fcfs::Thread;
+use crate::thread::{self};
 
 /// Atomic counting semaphore
 ///
@@ -16,7 +16,7 @@ use crate::thread::{self, Thread};
 #[derive(Clone)]
 pub struct Semaphore {
     value: Cell<usize>,
-    waiters: RefCell<VecDeque<Arc<Thread>>>,
+    waiters: RefCell<FIFOPrioriyQueue<Thread>>,
 }
 
 unsafe impl Sync for Semaphore {}
@@ -24,10 +24,10 @@ unsafe impl Send for Semaphore {}
 
 impl Semaphore {
     /// Creates a new semaphore of initial value n.
-    pub const fn new(n: usize) -> Self {
+    pub fn new(n: usize) -> Self {
         Semaphore {
             value: Cell::new(n),
-            waiters: RefCell::new(VecDeque::new()),
+            waiters: RefCell::new(FIFOPrioriyQueue::new()),
         }
     }
 
@@ -38,7 +38,7 @@ impl Semaphore {
         // Is semaphore available?
         while self.value() == 0 {
             // `push_front` ensures to wake up threads in a fifo manner
-            self.waiters.borrow_mut().push_front(thread::current());
+            self.waiters.borrow_mut().push(thread::current().into());
 
             // Block the current thread until it's awakened by an `up` operation
             thread::block();
@@ -51,13 +51,13 @@ impl Semaphore {
     /// V operation
     pub fn up(&self) {
         let old = sbi::interrupt::set(false);
-        let count = self.value.replace(self.value() + 1);
+        self.value.replace(self.value() + 1);
+        let result = self.waiters.borrow_mut().pop();
 
         // Check if we need to wake up a sleeping waiter
-        if let Some(thread) = self.waiters.borrow_mut().pop_back() {
-            assert_eq!(count, 0);
-
-            thread::wake_up(thread.clone());
+        if let Some(thread) = result {
+            // assert_eq!(count, 0);
+            thread::wake_up(thread.clone().0);
         }
 
         sbi::interrupt::set(old);

@@ -14,6 +14,7 @@ pub mod error;
 pub mod fs;
 pub mod io;
 pub mod mem;
+pub mod pq;
 pub mod sync;
 pub mod thread;
 pub mod trap;
@@ -40,10 +41,12 @@ extern "C" {
 
 pub type Result<T> = core::result::Result<T, OsError>;
 
+/// Read a line from the kernel console. '\n' won't be contained in the result.
+#[allow(dead_code)]
 fn read_line() -> Option<String> {
     let mut input = Vec::new();
     let mut result = console_getchar();
-    while result != ('\n' as usize) {
+    while result != '\n' as usize {
         input.push(result);
         result = console_getchar();
     }

@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
 
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
 use crate::sbi::interrupt;
-use crate::thread::Manager;
+use crate::thread::{current, schedule, Manager};
 use crate::userproc::UserProc;
 
 pub const PRI_DEFAULT: u32 = 31;
@@ -172,6 +172,17 @@ impl Builder {
         kprintln!("[THREAD] create {:?}", new_thread);
 
         Manager::get().register(new_thread.clone());
+
+        kprintln!(
+            "spawning new thread with priority {}",
+            new_thread.priority.load(SeqCst)
+        );
+
+        kprintln!("current priority is {}", current().priority.load(SeqCst));
+
+        if new_thread.priority.load(SeqCst) > current().priority.load(SeqCst) {
+            schedule()
+        }
 
         // Off you go
         new_thread
