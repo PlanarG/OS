@@ -1,5 +1,3 @@
-use core::sync::atomic::Ordering::SeqCst;
-
 use alloc::sync::Arc;
 
 use crate::{
@@ -12,16 +10,16 @@ pub struct Thread(pub Arc<thread::Thread>);
 
 impl PartialEq for Thread {
     fn eq(&self, other: &Self) -> bool {
-        let p_this = self.0.priority.load(SeqCst);
-        let p_other = other.0.priority.load(SeqCst);
+        let p_this = self.0.priority();
+        let p_other = other.0.priority();
         p_this == p_other
     }
 }
 
 impl PartialOrd for Thread {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        let p_this = self.0.priority.load(SeqCst);
-        let p_other = other.0.priority.load(SeqCst);
+        let p_this = self.0.priority();
+        let p_other = other.0.priority();
         Some(p_this.cmp(&p_other))
     }
 }

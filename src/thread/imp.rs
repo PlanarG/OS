@@ -1,8 +1,10 @@
 //! Implementation of kernel threads
 
 use alloc::boxed::Box;
+use alloc::collections::BinaryHeap;
 use alloc::sync::Arc;
 use core::arch::global_asm;
+
 use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
 
@@ -19,6 +21,32 @@ pub const STACK_ALIGN: usize = 16;
 
 pub type Mutex<T> = crate::sync::Mutex<T, crate::sync::Intr>;
 
+// eraseable binary heap
+#[derive(Default)]
+pub struct EBinaryHeap(BinaryHeap<u32>, BinaryHeap<u32>);
+
+impl EBinaryHeap {
+    pub fn push(&mut self, key: u32) {
+        self.0.push(key)
+    }
+
+    pub fn peek(&mut self) -> Option<&u32> {
+        while let Some(peek) = self.1.peek() {
+            if self.0.peek().unwrap() == peek {
+                self.0.pop();
+                self.1.pop();
+            } else {
+                break;
+            }
+        }
+        self.0.peek()
+    }
+
+    pub fn erase(&mut self, key: u32) {
+        self.1.push(key)
+    }
+}
+
 /* --------------------------------- Thread --------------------------------- */
 /// All data of a kernel thread
 #[repr(C)]
@@ -28,9 +56,19 @@ pub struct Thread {
     stack: usize,
     status: Mutex<Status>,
     context: Mutex<Context>,
-    pub priority: AtomicU32,
+    priority: AtomicU32,
     pub userproc: Option<UserProc>,
     pub pagetable: Option<Mutex<PageTable>>,
+    // lock holder
+    // Add Mutex<> only to make rust happy
+    pub dependency: Mutex<Option<Arc<Thread>>>,
+    // warning: to modify this variable, close interrupt first
+    // because we should prevent other threads from updating their pirority
+    // when we are dealing with the current modification.
+    // Mutex<> on this is dangerous. SB compiler continuously complains about
+    // the mutable borrow of EBinaryHeap, while in fact interrupts cannot
+    // happen during the modification. Add Mutex<> only to make rust happy.
+    pub donated_priorities: Mutex<EBinaryHeap>,
 }
 
 impl Thread {
@@ -54,6 +92,8 @@ impl Thread {
             priority: AtomicU32::new(priority),
             userproc,
             pagetable: pagetable.map(Mutex::new),
+            dependency: Mutex::new(None),
+            donated_priorities: Mutex::new(EBinaryHeap::default()),
         }
     }
 
@@ -75,6 +115,59 @@ impl Thread {
 
     pub fn context(&self) -> *mut Context {
         (&*self.context.lock()) as *const _ as *mut _
+    }
+
+    pub fn set_priority(&self, p: u32) {
+        self.priority.store(p, SeqCst);
+    }
+
+    // turn interrupt off before entering this function
+    // returns the effective priority of this thread
+    pub fn priority(&self) -> u32 {
+        let current = self.priority.load(SeqCst);
+        match self.donated_priorities.lock().peek() {
+            Some(p) => core::cmp::max(current, *p),
+            None => current,
+        }
+    }
+
+    // update donated priority in the dependency chain
+    fn upload_prioriy(&self, previous: u32, modified: u32) {
+        if previous != modified {
+            let tmp = self.dependency.lock().clone();
+            if let Some(dependency) = tmp {
+                dependency.replace_donator(previous, modified);
+            }
+        }
+    }
+
+    // replace this thread's donated priority and upload
+    fn replace_donator(&self, previous: u32, modified: u32) {
+        let p = self.priority();
+
+        let mut locked = self.donated_priorities.lock();
+        locked.erase(previous);
+        locked.push(modified);
+        drop(locked);
+
+        let m = self.priority();
+
+        self.upload_prioriy(p, m);
+    }
+
+    pub fn add_donator(&self, priority: u32) {
+        let previous = self.priority();
+        // kprintln!("add: {}", priority);
+        self.donated_priorities.lock().push(priority);
+        let modified = self.priority();
+
+        self.upload_prioriy(previous, modified);
+    }
+
+    pub fn remove_donator(&self, priority: u32) {
+        assert!(self.dependency.lock().is_none());
+        // kprintln!("remove: {}", priority);
+        self.donated_priorities.lock().erase(priority);
     }
 }
 
@@ -173,12 +266,12 @@ impl Builder {
 
         Manager::get().register(new_thread.clone());
 
-        kprintln!(
-            "spawning new thread with priority {}",
-            new_thread.priority.load(SeqCst)
-        );
+        // kprintln!(
+        //     "spawning new thread with priority {}",
+        //     new_thread.priority.load(SeqCst)
+        // );
 
-        kprintln!("current priority is {}", current().priority.load(SeqCst));
+        // kprintln!("current priority is {}", current().priority.load(SeqCst));
 
         if new_thread.priority.load(SeqCst) > current().priority.load(SeqCst) {
             schedule()

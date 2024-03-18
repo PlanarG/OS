@@ -42,15 +42,15 @@
 //! ```
 //!
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use crate::sync::{Lock, MutexGuard, Semaphore};
 use crate::thread::current;
 use crate::thread::scheduler::fcfs::Thread;
 
-pub struct Condvar(RefCell<BTreeMap<Thread, Arc<Semaphore>>>);
+pub struct Condvar(RefCell<Vec<(Thread, Arc<Semaphore>)>>);
 
 unsafe impl Sync for Condvar {}
 unsafe impl Send for Condvar {}
@@ -62,7 +62,7 @@ impl Condvar {
 
     pub fn wait<T, L: Lock>(&self, guard: &mut MutexGuard<'_, T, L>) {
         let sema = Arc::new(Semaphore::new(0));
-        self.0.borrow_mut().insert(current().into(), sema.clone());
+        self.0.borrow_mut().push((current().into(), sema.clone()));
 
         guard.release();
         sema.down();
@@ -71,7 +71,16 @@ impl Condvar {
 
     /// Wake up one thread from the waiting list
     pub fn notify_one(&self) {
-        self.0.borrow_mut().pop_last().unwrap().1.up();
+        let result = self
+            .0
+            .borrow_mut()
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (x, _))| x)
+            .map(|(index, _)| index);
+        if let Some(index) = result {
+            self.0.borrow_mut().remove(index).1.up();
+        }
     }
 
     /// Wake up all waiting threads

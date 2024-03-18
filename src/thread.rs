@@ -5,9 +5,7 @@ pub mod manager;
 pub mod scheduler;
 pub mod switch;
 
-use core::sync::atomic::Ordering::SeqCst;
-
-use crate::sbi::timer::timer_ticks;
+use crate::sbi::{self, timer::timer_ticks};
 
 pub use self::imp::*;
 pub use self::manager::Manager;
@@ -72,33 +70,40 @@ pub fn wake_up(thread: Arc<Thread>) {
 
     Manager::get().scheduler.lock().register(thread.clone());
 
-    if thread.priority.load(SeqCst) > get_priority() {
+    if thread.priority() > get_priority() {
         schedule()
     }
 }
 
 /// (Lab1) Sets the current thread's priority to a given value
-pub fn set_priority(_priority: u32) {
+pub fn set_priority(p: u32) {
+    let old = sbi::interrupt::set(false);
     let current = current();
+    // kprintln!("set {}'s priority to {}", current.id(), p);
     let previous = get_priority();
 
-    current.priority.store(_priority, SeqCst);
+    assert!(current.dependency.lock().is_none());
+    current.set_priority(p);
 
-    let condition = _priority < previous
+    let priority = get_priority();
+
+    let condition = priority < previous
         && Manager::get()
             .scheduler
             .lock()
             .next()
-            .is_some_and(|thread| _priority < thread.priority.load(SeqCst));
+            .is_some_and(|thread| priority < thread.priority());
 
     if condition {
         schedule()
     }
+
+    sbi::interrupt::set(old);
 }
 
 /// (Lab1) Returns the current thread's effective priority.
 pub fn get_priority() -> u32 {
-    current().priority.load(SeqCst)
+    current().priority()
 }
 
 /// (Lab1) Make the current thread sleep for the given ticks.

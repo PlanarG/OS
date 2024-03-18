@@ -5,7 +5,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::DerefMut;
-use core::sync::atomic::Ordering::SeqCst;
 
 use crate::mem::KernelPgTable;
 use crate::sbi::interrupt;
@@ -86,16 +85,19 @@ impl Manager {
         let current = timer_ticks();
         let mut wake_list = self.sleep_threads.lock();
         let remaining = wake_list.split_off(&(current + 1));
-        for (_, v) in wake_list.iter() {
+        let to_wakeup = wake_list.clone();
+
+        *wake_list = remaining;
+        drop(wake_list);
+
+        for (_, v) in to_wakeup.iter() {
             for threads in v {
                 if threads.status() == Status::Blocked {
                     wake_up(threads.clone());
                 }
             }
         }
-        *wake_list = remaining;
 
-        drop(wake_list);
         interrupt::set(old);
     }
 
@@ -121,8 +123,7 @@ impl Manager {
         );
 
         if next.clone().is_some_and(|next| {
-            next.priority.load(SeqCst) >= get_priority()
-                || self.current.lock().status() != Status::Running
+            next.priority() >= get_priority() || self.current.lock().status() != Status::Running
         }) {
             let next = self.scheduler.lock().schedule().unwrap();
 
