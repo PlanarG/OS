@@ -55,6 +55,7 @@ pub trait Vnode: Sync + Send {
     fn allow_write(&self);
 
     fn len(&self) -> usize;
+    fn ino(&self) -> usize;
     fn resize(&self, size: usize) -> Result<()>;
     fn close(&self);
 }
@@ -74,6 +75,10 @@ pub struct File {
 }
 
 impl File {
+    pub fn ino(&self) -> usize {
+        self.vnode.ino()
+    }
+
     pub fn set_len(&mut self, size: usize) -> Result<()> {
         self.vnode.resize(size)
     }
@@ -121,6 +126,11 @@ impl File {
     pub fn deny_write(&mut self) {
         self.deny_write = true;
         self.vnode.deny_write();
+    }
+
+    pub fn allow_write(&mut self) {
+        self.deny_write = false;
+        self.vnode.allow_write();
     }
 }
 

@@ -7,6 +7,7 @@
 //! memory(pm): kvm = pm + [mem::OFFSET].
 //!
 
+pub mod frametable;
 pub mod layout;
 pub mod malloc;
 pub mod pagetable;
@@ -14,6 +15,7 @@ pub mod palloc;
 pub mod userbuf;
 mod utils;
 
+pub use self::frametable::*;
 pub use self::layout::*;
 pub use self::malloc::{kalloc, kfree};
 pub use self::pagetable::*;

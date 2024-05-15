@@ -5,7 +5,9 @@ pub mod manager;
 pub mod scheduler;
 pub mod switch;
 
-use crate::sbi::{self, timer::timer_ticks};
+#[cfg(feature = "thread-scheduler-priority")]
+use crate::sbi;
+use crate::sbi::timer::timer_ticks;
 
 pub use self::imp::*;
 pub use self::manager::Manager;
@@ -61,6 +63,7 @@ pub fn block() {
 
 /// Wake up a previously blocked thread, mark it as [`Ready`](Status::Ready),
 /// and register it into the scheduler.
+
 pub fn wake_up(thread: Arc<Thread>) {
     assert_eq!(thread.status(), Status::Blocked);
     thread.set_status(Status::Ready);
@@ -70,12 +73,14 @@ pub fn wake_up(thread: Arc<Thread>) {
 
     Manager::get().scheduler.lock().register(thread.clone());
 
+    #[cfg(feature = "thread-scheduler-priority")]
     if thread.priority() > get_priority() {
         schedule()
     }
 }
 
 /// (Lab1) Sets the current thread's priority to a given value
+#[cfg(feature = "thread-scheduler-priority")]
 pub fn set_priority(p: u32) {
     let old = sbi::interrupt::set(false);
     let current = current();
@@ -101,9 +106,18 @@ pub fn set_priority(p: u32) {
     sbi::interrupt::set(old);
 }
 
+#[cfg(not(feature = "thread-scheduler-priority"))]
+pub fn set_priority(_: u32) {}
+
 /// (Lab1) Returns the current thread's effective priority.
+#[cfg(feature = "thread-scheduler-priority")]
 pub fn get_priority() -> u32 {
     current().priority()
+}
+
+#[cfg(not(feature = "thread-scheduler-priority"))]
+pub fn get_priority() -> u32 {
+    0
 }
 
 /// (Lab1) Make the current thread sleep for the given ticks.

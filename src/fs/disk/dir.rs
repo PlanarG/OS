@@ -1,5 +1,6 @@
 //! Root dir.
 //!
+
 use super::{Inum, Path};
 use crate::fs::File;
 use crate::io::prelude::*;
@@ -28,6 +29,8 @@ impl RootDir {
                     .to_str()
                     .or(Err(OsError::CstrFormatErr))?
             };
+
+            // kprintln!("searched: {}, target: {}.", name, path.as_str());
             // Deref `Path` to `String`.
             if path.eq(name) {
                 return Ok(entry.inum);

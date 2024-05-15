@@ -8,7 +8,7 @@ use crate::sync::{Intr, Lazy, Mutex};
 // BuddyAllocator allocates at most `1<<MAX_ORDER` pages at a time
 const MAX_ORDER: usize = 10;
 // How many pages are there in the user memory pool
-const USER_POOL_LIMIT: usize = 1024;
+pub const USER_POOL_LIMIT: usize = 1024;
 
 /// Buddy Allocator. It allocates and deallocates memory page-wise.
 #[derive(Debug)]
@@ -19,6 +19,8 @@ struct BuddyAllocator {
     total: usize,
     /// The number of pages allocated
     allocated: usize,
+    /// Lowest physical address
+    lowest: usize,
 }
 
 impl BuddyAllocator {
@@ -29,6 +31,7 @@ impl BuddyAllocator {
             free_lists: [InMemList::new(); MAX_ORDER + 1],
             total: 0,
             allocated: 0,
+            lowest: usize::MAX,
         }
     }
 
@@ -36,6 +39,9 @@ impl BuddyAllocator {
     unsafe fn insert_range(&mut self, start: usize, end: usize) {
         let start = round_up(start, PG_SIZE);
         let end = round_down(end, PG_SIZE);
+
+        self.lowest = min(self.lowest, start);
+
         self.total += end - start;
 
         let mut current_start: usize = start;
@@ -53,8 +59,12 @@ impl BuddyAllocator {
         }
     }
 
+    pub fn lowest(&self) -> usize {
+        self.lowest
+    }
+
     /// Allocate n pages and returns the virtual address.
-    unsafe fn alloc(&mut self, n: usize) -> *mut u8 {
+    unsafe fn alloc(&mut self, n: usize) -> Option<*mut u8> {
         assert!(n <= 1 << MAX_ORDER, "request is too large");
 
         let order = n.next_power_of_two().trailing_zeros() as usize;
@@ -72,11 +82,11 @@ impl BuddyAllocator {
                     }
                 }
                 self.allocated += 1 << order;
-                return self.free_lists[order].pop().unwrap().cast();
+                return Some(self.free_lists[order].pop().unwrap().cast());
             }
         }
 
-        unreachable!("memory is exhausted");
+        None
     }
 
     /// Deallocate a chunk of pages
@@ -125,7 +135,7 @@ impl Palloc {
 
     /// Allocate n pages of a consecutive memory segment
     pub unsafe fn alloc(n: usize) -> *mut u8 {
-        Self::instance().lock().alloc(n)
+        Self::instance().lock().alloc(n).unwrap()
     }
 
     /// Free n pages of memory starting at `ptr`
@@ -147,13 +157,17 @@ unsafe impl Sync for UserPool {}
 
 impl UserPool {
     /// Allocate n pages of consecutive space
-    pub unsafe fn alloc_pages(n: usize) -> *mut u8 {
+    pub unsafe fn alloc_pages(n: usize) -> Option<*mut u8> {
         Self::instance().lock().alloc(n)
     }
 
     /// Free n pages of memory starting at `ptr`
     pub unsafe fn dealloc_pages(ptr: *mut u8, n: usize) {
         Self::instance().lock().dealloc(ptr, n)
+    }
+
+    pub fn lowest() -> usize {
+        Self::instance().lock().lowest()
     }
 
     fn instance() -> &'static Mutex<BuddyAllocator, Intr> {

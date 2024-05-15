@@ -48,9 +48,16 @@ use core::cell::RefCell;
 
 use crate::sync::{Lock, MutexGuard, Semaphore};
 use crate::thread::current;
-use crate::thread::scheduler::fcfs::Thread;
 
+#[cfg(feature = "thread-scheduler-priority")]
+use crate::thread::scheduler::pirority::Thread;
+#[cfg(not(feature = "thread-scheduler-priority"))]
+use crate::thread::Thread;
+
+#[cfg(feature = "thread-scheduler-priority")]
 pub struct Condvar(RefCell<Vec<(Thread, Arc<Semaphore>)>>);
+#[cfg(not(feature = "thread-scheduler-priority"))]
+pub struct Condvar(RefCell<Vec<(Arc<Thread>, Arc<Semaphore>)>>);
 
 unsafe impl Sync for Condvar {}
 unsafe impl Send for Condvar {}
@@ -62,7 +69,11 @@ impl Condvar {
 
     pub fn wait<T, L: Lock>(&self, guard: &mut MutexGuard<'_, T, L>) {
         let sema = Arc::new(Semaphore::new(0));
+
+        #[cfg(feature = "thread-scheduler-priority")]
         self.0.borrow_mut().push((current().into(), sema.clone()));
+        #[cfg(not(feature = "thread-scheduler-priority"))]
+        self.0.borrow_mut().push((current(), sema.clone()));
 
         guard.release();
         sema.down();
@@ -70,6 +81,7 @@ impl Condvar {
     }
 
     /// Wake up one thread from the waiting list
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn notify_one(&self) {
         let result = self
             .0
@@ -80,6 +92,13 @@ impl Condvar {
             .map(|(index, _)| index);
         if let Some(index) = result {
             self.0.borrow_mut().remove(index).1.up();
+        }
+    }
+
+    #[cfg(not(feature = "thread-scheduler-priority"))]
+    pub fn notify_one(&self) {
+        if let Some((_, sema)) = self.0.borrow_mut().pop() {
+            sema.up();
         }
     }
 

@@ -191,6 +191,10 @@ impl Inode {
 }
 
 impl Vnode for Inode {
+    fn ino(&self) -> usize {
+        self.0.lock().0.sector as _
+    }
+
     fn len(&self) -> usize {
         self.0.lock().1.inner.len as _
     }

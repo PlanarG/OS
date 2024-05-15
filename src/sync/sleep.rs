@@ -1,7 +1,9 @@
 use alloc::sync::Arc;
+#[cfg(feature = "thread-scheduler-priority")]
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+#[cfg(feature = "thread-scheduler-priority")]
 use crate::sbi;
 use crate::sync::{Lock, Semaphore};
 use crate::thread::{self, Thread};
@@ -11,6 +13,7 @@ use crate::thread::{self, Thread};
 pub struct Sleep {
     inner: Semaphore,
     holder: RefCell<Option<Arc<Thread>>>,
+    #[cfg(feature = "thread-scheduler-priority")]
     waiter: RefCell<Vec<Arc<Thread>>>,
 }
 
@@ -19,11 +22,13 @@ impl Default for Sleep {
         Self {
             inner: Semaphore::new(1),
             holder: Default::default(),
+            #[cfg(feature = "thread-scheduler-priority")]
             waiter: Default::default(),
         }
     }
 }
 
+#[cfg(feature = "thread-scheduler-priority")]
 impl Lock for Sleep {
     fn acquire(&self) {
         let old = sbi::interrupt::set(false);
@@ -88,6 +93,24 @@ impl Lock for Sleep {
         self.inner.up();
 
         sbi::interrupt::set(old);
+    }
+}
+
+#[cfg(not(feature = "thread-scheduler-priority"))]
+impl Lock for Sleep {
+    fn acquire(&self) {
+        self.inner.down();
+        self.holder.borrow_mut().replace(thread::current());
+    }
+
+    fn release(&self) {
+        assert!(Arc::ptr_eq(
+            self.holder.borrow().as_ref().unwrap(),
+            &thread::current()
+        ));
+
+        self.holder.borrow_mut().take().unwrap();
+        self.inner.up();
     }
 }
 

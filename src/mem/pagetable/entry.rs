@@ -55,8 +55,20 @@ impl Entry {
         self.flag().contains(PTEFlags::V)
     }
 
+    pub fn clean_valid_bit(&mut self) {
+        self.0 &= !PTEFlags::V.bits;
+    }
+
     pub fn is_global(&self) -> bool {
         self.flag().contains(PTEFlags::G)
+    }
+
+    pub fn is_accessed(&self) -> bool {
+        self.flag().contains(PTEFlags::A)
+    }
+
+    pub fn clean_access_bit(&mut self) {
+        self.0 &= !PTEFlags::A.bits;
     }
 
     pub fn is_rwable(&self) -> bool {
@@ -65,6 +77,10 @@ impl Entry {
 
     pub fn is_user(&self) -> bool {
         self.flag().contains(PTEFlags::U)
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.flag().contains(PTEFlags::D)
     }
 
     /// A PTE is a leaf PTE when at least one bit in R, W and X

@@ -1,56 +1,20 @@
-use alloc::sync::Arc;
+use alloc::{collections::VecDeque, sync::Arc};
 
-use crate::{
-    pq::FIFOPrioriyQueue,
-    thread::{self, Schedule},
-};
+use crate::thread::{Schedule, Thread};
 
-#[derive(Clone)]
-pub struct Thread(pub Arc<thread::Thread>);
-
-impl PartialEq for Thread {
-    fn eq(&self, other: &Self) -> bool {
-        let p_this = self.0.priority();
-        let p_other = other.0.priority();
-        p_this == p_other
-    }
-}
-
-impl PartialOrd for Thread {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        let p_this = self.0.priority();
-        let p_other = other.0.priority();
-        Some(p_this.cmp(&p_other))
-    }
-}
-
-impl Eq for Thread {}
-
-impl Ord for Thread {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-impl From<Arc<thread::Thread>> for Thread {
-    fn from(value: Arc<thread::Thread>) -> Self {
-        Thread(value)
-    }
-}
-/// FIFO scheduler.
 #[derive(Default)]
-pub struct Fcfs(FIFOPrioriyQueue<Thread>);
+pub struct Fcfs(VecDeque<Arc<Thread>>);
 
 impl Schedule for Fcfs {
-    fn register(&mut self, thread: Arc<thread::Thread>) {
-        self.0.push(thread.into())
+    fn register(&mut self, thread: Arc<Thread>) {
+        self.0.push_front(thread)
     }
 
-    fn schedule(&mut self) -> Option<Arc<thread::Thread>> {
-        self.0.pop().map(|thread| thread.0)
+    fn schedule(&mut self) -> Option<Arc<Thread>> {
+        self.0.pop_back()
     }
 
-    fn next(&mut self) -> Option<Arc<thread::Thread>> {
-        self.0.peek().map(|thread| thread.0.clone())
+    fn next(&mut self) -> Option<Arc<Thread>> {
+        self.0.back().map(|x| x.clone())
     }
 }

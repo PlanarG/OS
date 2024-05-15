@@ -11,7 +11,7 @@ include user/*.mk
 $(BUILD_DIR)/mkfs: mkfs.c
 	gcc -o $@ mkfs.c
 
-$(BUILD_DIR)/disk.img: $(TARGETS) $(BUILD_DIR)/mkfs $(BUILD_DIR)/sample.txt
+$(BUILD_DIR)/disk.img: $(TARGETS) $(BUILD_DIR)/mkfs $(TEST_DIR)/sample.txt $(TEST_DIR)/zeros
 	cd $(BUILD_DIR)/ && ./mkfs
 
 run: all
@@ -31,6 +31,11 @@ clean:
 	rm -f mkfs
 	cargo clean
 	cd tool && cargo clean && cd ..
+
+clean-tacos:
+	rm -rf $(BUILD_DIR)
+	rm -f mkfs
+	cargo clean
 
 format:
 	cargo fmt

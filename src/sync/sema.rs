@@ -1,8 +1,17 @@
 use core::cell::{Cell, RefCell};
 
+#[cfg(not(feature = "thread-scheduler-priority"))]
+use alloc::collections::VecDeque;
+#[cfg(not(feature = "thread-scheduler-priority"))]
+use alloc::sync::Arc;
+
+#[cfg(feature = "thread-scheduler-priority")]
 use crate::pq::FIFOPrioriyQueue;
 use crate::sbi;
+#[cfg(feature = "thread-scheduler-priority")]
 use crate::thread::scheduler::fcfs::Thread;
+#[cfg(not(feature = "thread-scheduler-priority"))]
+use crate::thread::Thread;
 use crate::thread::{self};
 
 /// Atomic counting semaphore
@@ -16,7 +25,10 @@ use crate::thread::{self};
 #[derive(Clone)]
 pub struct Semaphore {
     value: Cell<usize>,
+    #[cfg(feature = "thread-scheduler-priority")]
     waiters: RefCell<FIFOPrioriyQueue<Thread>>,
+    #[cfg(not(feature = "thread-scheduler-priority"))]
+    waiters: RefCell<VecDeque<Arc<Thread>>>,
 }
 
 unsafe impl Sync for Semaphore {}
@@ -24,6 +36,8 @@ unsafe impl Send for Semaphore {}
 
 impl Semaphore {
     /// Creates a new semaphore of initial value n.
+
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn new(n: usize) -> Self {
         Semaphore {
             value: Cell::new(n),
@@ -31,7 +45,16 @@ impl Semaphore {
         }
     }
 
+    #[cfg(not(feature = "thread-scheduler-priority"))]
+    pub const fn new(n: usize) -> Self {
+        Semaphore {
+            value: Cell::new(n),
+            waiters: RefCell::new(VecDeque::new()),
+        }
+    }
+
     /// P operation
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn down(&self) {
         let old = sbi::interrupt::set(false);
 
@@ -48,7 +71,25 @@ impl Semaphore {
         sbi::interrupt::set(old);
     }
 
+    #[cfg(not(feature = "thread-scheduler-priority"))]
+    pub fn down(&self) {
+        let old = sbi::interrupt::set(false);
+
+        // Is semaphore available?
+        while self.value() == 0 {
+            // `push_front` ensures to wake up threads in a fifo manner
+            self.waiters.borrow_mut().push_front(thread::current());
+
+            // Block the current thread until it's awakened by an `up` operation
+            thread::block();
+        }
+        self.value.set(self.value() - 1);
+
+        sbi::interrupt::set(old);
+    }
+
     /// V operation
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn up(&self) {
         let old = sbi::interrupt::set(false);
         self.value.replace(self.value() + 1);
@@ -58,6 +99,21 @@ impl Semaphore {
         if let Some(thread) = result {
             // assert_eq!(count, 0);
             thread::wake_up(thread.clone().0);
+        }
+
+        sbi::interrupt::set(old);
+    }
+
+    #[cfg(not(feature = "thread-scheduler-priority"))]
+    pub fn up(&self) {
+        let old = sbi::interrupt::set(false);
+        let count = self.value.replace(self.value() + 1);
+
+        // Check if we need to wake up a sleeping waiter
+        if let Some(thread) = self.waiters.borrow_mut().pop_back() {
+            assert_eq!(count, 0);
+
+            thread::wake_up(thread.clone());
         }
 
         sbi::interrupt::set(old);

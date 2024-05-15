@@ -20,6 +20,7 @@ use self::inode::Inode;
 
 use super::{File, FileSys, Vnode};
 use crate::device::virtio::{Virtio, SECTOR_SIZE};
+use crate::mem::PG_SIZE;
 use crate::sync::{Lazy, Mutex};
 use crate::{OsError, Result};
 
@@ -198,4 +199,37 @@ impl FileSys for DiskFs {
 
 pub(self) fn bytes_to_sectors(bytes: usize) -> u32 {
     ((bytes + SECTOR_SIZE - 1) / SECTOR_SIZE) as u32
+}
+
+impl DiskFs {
+    pub fn alloc_page(&self) -> Result<super::File> {
+        let sector = self.free_map.lock().alloc(1)?;
+        let cnt = bytes_to_sectors(PG_SIZE / SECTOR_SIZE);
+        let start = self.free_map.lock().alloc(cnt)?;
+
+        let vnode = Inode::create(sector, start, cnt as usize)?;
+        let weak = Arc::downgrade(&vnode);
+
+        self.inode_table.lock().insert(sector, weak);
+        Ok(File::new(vnode))
+    }
+
+    pub fn from_location(&self, location: usize) -> Result<super::File> {
+        let vnode = Inode::open(location as u32)?;
+        Ok(File::new(vnode))
+    }
+
+    pub fn free_location(&self, location: usize) {
+        if let Some(arc) = self
+            .inode_table
+            .lock()
+            .get(&(location as u32))
+            .and_then(Weak::upgrade)
+        {
+            arc.remove()
+        } else {
+            let inode = Inode::open(location as u32).unwrap();
+            inode.remove()
+        }
+    }
 }

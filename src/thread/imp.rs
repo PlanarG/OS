@@ -1,13 +1,14 @@
 //! Implementation of kernel threads
 
 use alloc::boxed::Box;
-use alloc::collections::BinaryHeap;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::sync::Arc;
 use core::arch::global_asm;
 
 use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering::SeqCst};
 
+use crate::fs::File;
 use crate::mem::{kalloc, kfree, PageTable, PG_SIZE};
 use crate::sbi::interrupt;
 use crate::thread::{current, schedule, Manager};
@@ -18,6 +19,8 @@ pub const PRI_MAX: u32 = 63;
 pub const PRI_MIN: u32 = 0;
 pub const STACK_SIZE: usize = PG_SIZE * 4;
 pub const STACK_ALIGN: usize = 16;
+pub const STACK_TOP: usize = 0x80500000;
+pub const MAGIC: usize = 0xdeadbeef;
 
 pub type Mutex<T> = crate::sync::Mutex<T, crate::sync::Intr>;
 
@@ -47,6 +50,12 @@ impl EBinaryHeap {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum ChildStatus {
+    Alive,
+    Exited(isize),
+}
+
 /* --------------------------------- Thread --------------------------------- */
 /// All data of a kernel thread
 #[repr(C)]
@@ -61,6 +70,7 @@ pub struct Thread {
     pub pagetable: Option<Mutex<PageTable>>,
     // lock holder
     // Add Mutex<> only to make rust happy
+    #[cfg(feature = "thread-scheduler-priority")]
     pub dependency: Mutex<Option<Arc<Thread>>>,
     // warning: to modify this variable, close interrupt first
     // because we should prevent other threads from updating their pirority
@@ -68,10 +78,18 @@ pub struct Thread {
     // Mutex<> on this is dangerous. SB compiler continuously complains about
     // the mutable borrow of EBinaryHeap, while in fact interrupts cannot
     // happen during the modification. Add Mutex<> only to make rust happy.
+    #[cfg(feature = "thread-scheduler-priority")]
     pub donated_priorities: Mutex<EBinaryHeap>,
+    pub children: Mutex<BTreeMap<isize, ChildStatus>>,
+    pub descriptors: Mutex<BTreeMap<usize, (File, usize)>>,
 }
 
 impl Thread {
+    pub fn get_and_increase_id() -> isize {
+        static TID: AtomicIsize = AtomicIsize::new(0);
+        TID.fetch_add(1, SeqCst)
+    }
+
     pub fn new(
         name: &'static str,
         stack: usize,
@@ -79,12 +97,15 @@ impl Thread {
         entry: usize,
         userproc: Option<UserProc>,
         pagetable: Option<PageTable>,
+        id: Option<isize>,
     ) -> Self {
-        /// The next thread's id
-        static TID: AtomicIsize = AtomicIsize::new(0);
+        let tid = match id {
+            Some(inner) => inner,
+            None => Self::get_and_increase_id(),
+        };
 
         Thread {
-            tid: TID.fetch_add(1, SeqCst),
+            tid,
             name,
             stack,
             status: Mutex::new(Status::Ready),
@@ -92,8 +113,12 @@ impl Thread {
             priority: AtomicU32::new(priority),
             userproc,
             pagetable: pagetable.map(Mutex::new),
+            #[cfg(feature = "thread-scheduler-priority")]
             dependency: Mutex::new(None),
+            #[cfg(feature = "thread-scheduler-priority")]
             donated_priorities: Mutex::new(EBinaryHeap::default()),
+            children: Mutex::new(BTreeMap::new()),
+            descriptors: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -123,6 +148,7 @@ impl Thread {
 
     // turn interrupt off before entering this function
     // returns the effective priority of this thread
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn priority(&self) -> u32 {
         let current = self.priority.load(SeqCst);
         match self.donated_priorities.lock().peek() {
@@ -132,6 +158,7 @@ impl Thread {
     }
 
     // update donated priority in the dependency chain
+    #[cfg(feature = "thread-scheduler-priority")]
     fn upload_prioriy(&self, previous: u32, modified: u32) {
         if previous != modified {
             let tmp = self.dependency.lock().clone();
@@ -142,6 +169,7 @@ impl Thread {
     }
 
     // replace this thread's donated priority and upload
+    #[cfg(feature = "thread-scheduler-priority")]
     fn replace_donator(&self, previous: u32, modified: u32) {
         let p = self.priority();
 
@@ -155,6 +183,7 @@ impl Thread {
         self.upload_prioriy(p, m);
     }
 
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn add_donator(&self, priority: u32) {
         let previous = self.priority();
         // kprintln!("add: {}", priority);
@@ -164,10 +193,15 @@ impl Thread {
         self.upload_prioriy(previous, modified);
     }
 
+    #[cfg(feature = "thread-scheduler-priority")]
     pub fn remove_donator(&self, priority: u32) {
         assert!(self.dependency.lock().is_none());
         // kprintln!("remove: {}", priority);
         self.donated_priorities.lock().erase(priority);
+    }
+
+    pub fn overflow(&self) -> bool {
+        unsafe { (self.stack as *const usize).read() != MAGIC }
     }
 }
 
@@ -201,6 +235,7 @@ pub struct Builder {
     function: usize,
     userproc: Option<UserProc>,
     pagetable: Option<PageTable>,
+    id: Option<isize>,
 }
 
 impl Builder {
@@ -217,6 +252,7 @@ impl Builder {
             function: function as usize,
             userproc: None,
             pagetable: None,
+            id: None,
         }
     }
 
@@ -240,6 +276,11 @@ impl Builder {
         self
     }
 
+    pub fn id(mut self, id: isize) -> Self {
+        self.id = Some(id);
+        self
+    }
+
     pub fn build(self) -> Arc<Thread> {
         let stack = kalloc(STACK_SIZE, STACK_ALIGN) as usize;
 
@@ -250,6 +291,7 @@ impl Builder {
             self.function,
             self.userproc,
             self.pagetable,
+            self.id,
         ))
     }
 
@@ -266,17 +308,17 @@ impl Builder {
 
         Manager::get().register(new_thread.clone());
 
-        // kprintln!(
-        //     "spawning new thread with priority {}",
-        //     new_thread.priority.load(SeqCst)
-        // );
-
-        // kprintln!("current priority is {}", current().priority.load(SeqCst));
-
         if new_thread.priority.load(SeqCst) > current().priority.load(SeqCst) {
             schedule()
         }
 
+        if let Some(userproc) = new_thread.userproc.as_ref() {
+            userproc
+                .parent
+                .children
+                .lock()
+                .insert(new_thread.id(), ChildStatus::Alive);
+        }
         // Off you go
         new_thread
     }

@@ -13,6 +13,7 @@ use crate::thread::{
     schedule, switch, Builder, Mutex, Schedule, Scheduler, Status, Thread, PRI_DEFAULT, PRI_MIN,
 };
 
+#[cfg(feature = "thread-scheduler-priority")]
 use super::get_priority;
 
 /* --------------------------------- MANAGER -------------------------------- */
@@ -31,7 +32,8 @@ pub struct Manager {
 impl Manager {
     pub fn get() -> &'static Self {
         static TMANAGER: Lazy<Manager> = Lazy::new(|| {
-            let initial = Arc::new(Thread::new("Initial", 0, PRI_DEFAULT, 0, None, None));
+            let initial = Arc::new(Thread::new("Initial", 0, PRI_DEFAULT, 0, None, None, None));
+
             initial.set_status(Status::Running);
 
             let manager = Manager {
@@ -122,15 +124,20 @@ impl Manager {
             "no thread is ready"
         );
 
-        if next.clone().is_some_and(|next| {
-            next.priority() >= get_priority() || self.current.lock().status() != Status::Running
-        }) {
-            let next = self.scheduler.lock().schedule().unwrap();
+        // assert!(
+        //     !self.current.lock().overflow(),
+        //     "Current thread has overflowed its stack."
+        // );
 
-            // kprintln!(
-            //     "switch to a thread whose priority is {}",
-            //     next.priority.load(SeqCst)
-            // );
+        #[cfg(feature = "thread-scheduler-priority")]
+        let condition = next.clone().is_some_and(|next| {
+            next.priority() >= get_priority() || self.current.lock().status() != Status::Running
+        });
+        #[cfg(not(feature = "thread-scheduler-priority"))]
+        let condition = next.is_some();
+
+        if condition {
+            let next = self.scheduler.lock().schedule().unwrap();
 
             assert_eq!(next.status(), Status::Ready);
             next.set_status(Status::Running);
@@ -190,5 +197,13 @@ impl Manager {
         } else {
             KernelPgTable::get().activate();
         }
+    }
+
+    pub fn get_by_id(&self, id: isize) -> Option<Arc<Thread>> {
+        self.all
+            .lock()
+            .iter()
+            .find(|thread| thread.id() == id)
+            .map(|x| x.clone())
     }
 }

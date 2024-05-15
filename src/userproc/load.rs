@@ -4,8 +4,8 @@ use elf_rs::{Elf, ElfFile, ProgramHeaderEntry, ProgramHeaderFlags, ProgramType};
 use crate::fs::File;
 use crate::io::prelude::*;
 use crate::mem::pagetable::{PTEFlags, PageTable};
-use crate::mem::palloc::UserPool;
-use crate::mem::{div_round_up, PageAlign, PhysAddr, PG_MASK, PG_SIZE};
+
+use crate::mem::{div_round_up, FrameTable, PageAlign, PhysAddr, PG_MASK, PG_SIZE};
 use crate::{OsError, Result};
 
 #[derive(Debug, Clone, Copy)]
@@ -23,20 +23,24 @@ pub(super) struct ExecInfo {
 /// On success, returns `Ok(usize, usize)`:
 /// - arg0: the entry point of user program
 /// - arg1: the initial sp of user program
-pub(super) fn load_executable(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
-    let exec_info = load_elf(file, pagetable)?;
+pub(super) fn load_executable(
+    file: &mut File,
+    pagetable: &mut PageTable,
+    thread: isize,
+) -> Result<(ExecInfo, *mut u8)> {
+    let exec_info = load_elf(file, pagetable, thread)?;
 
     // Initialize user stack.
-    init_user_stack(pagetable, exec_info.init_sp);
+    let stack_va = init_user_stack(pagetable, exec_info.init_sp, thread);
 
     // Forbid modifying executable file when running
     file.deny_write();
 
-    Ok(exec_info)
+    Ok((exec_info, stack_va))
 }
 
 /// Parses the specified executable file and loads segments
-fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
+fn load_elf(file: &mut File, pagetable: &mut PageTable, thread: isize) -> Result<ExecInfo> {
     // Ensure cursor is at the beginning
     file.rewind()?;
 
@@ -52,7 +56,7 @@ fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
     // load each loadable segment into memory
     elf.program_header_iter()
         .filter(|p| p.ph_type() == ProgramType::LOAD)
-        .for_each(|p| load_segment(&buf, &p, pagetable));
+        .for_each(|p| load_segment(&buf, &p, pagetable, thread));
 
     Ok(ExecInfo {
         entry_point: elf.elf_header().entry_point() as _,
@@ -61,7 +65,12 @@ fn load_elf(file: &mut File, pagetable: &mut PageTable) -> Result<ExecInfo> {
 }
 
 /// Loads one segment and installs pagetable mappings
-fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageTable) {
+fn load_segment(
+    filebuf: &[u8],
+    phdr: &ProgramHeaderEntry,
+    pagetable: &mut PageTable,
+    thread: isize,
+) {
     assert_eq!(phdr.ph_type(), ProgramType::LOAD);
 
     // Meaningful contents of this segment starts from `fileoff`.
@@ -89,17 +98,13 @@ fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageT
 
     // Allocate & map pages
     for p in 0..pages {
-        let buf = unsafe { UserPool::alloc_pages(1) };
+        let readsz = readbytes.min(PG_SIZE);
+        let uaddr = ubase + p * PG_SIZE;
+
+        let buf = unsafe { FrameTable::alloc_page(thread, uaddr, true, leaf_flag) };
         let page = unsafe { (buf as *mut [u8; PG_SIZE]).as_mut().unwrap() };
 
-        // Read `readsz` bytes, fill remaining bytes with 0.
-        let readsz = readbytes.min(PG_SIZE);
         page[..readsz].copy_from_slice(&filebuf[readpos..readpos + readsz]);
-        page[readsz..].fill(0);
-
-        // The installed page will be freed when pagetable drops, which happens
-        // when user process exits. No manual resource collect is required.
-        let uaddr = ubase + p * PG_SIZE;
         pagetable.map(buf.into(), uaddr, 1, leaf_flag);
 
         readbytes -= readsz;
@@ -110,18 +115,21 @@ fn load_segment(filebuf: &[u8], phdr: &ProgramHeaderEntry, pagetable: &mut PageT
 }
 
 /// Initializes the user stack.
-fn init_user_stack(pagetable: &mut PageTable, init_sp: usize) {
+/// stack_va is required to locate the stack we're going to modify, since
+/// we can't use init_sp directly. stack_page is not activated yet.
+fn init_user_stack(pagetable: &mut PageTable, init_sp: usize, thread: isize) -> *mut u8 {
     assert!(init_sp % PG_SIZE == 0, "initial sp address misaligns");
 
+    let stack_page_begin = PageAlign::floor(init_sp - 1);
+    let flags = PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U;
+
     // Allocate a page from UserPool as user stack.
-    let stack_va = unsafe { UserPool::alloc_pages(1) };
+    let stack_va = unsafe { FrameTable::alloc_page(thread, stack_page_begin, true, flags) };
     let stack_pa = PhysAddr::from(stack_va);
 
     // Get the start address of stack page
-    let stack_page_begin = PageAlign::floor(init_sp - 1);
 
     // Install mapping
-    let flags = PTEFlags::V | PTEFlags::R | PTEFlags::W | PTEFlags::U;
     pagetable.map(stack_pa, stack_page_begin, PG_SIZE, flags);
 
     #[cfg(feature = "debug")]
@@ -130,4 +138,8 @@ fn init_user_stack(pagetable: &mut PageTable, init_sp: usize) {
         stack_va,
         stack_page_begin
     );
+
+    // Now stack_va points to the bottom of this newly allowcated page
+    // Adjust it to the top of this page
+    (stack_va as usize + PG_SIZE) as *mut u8
 }
